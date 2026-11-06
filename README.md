@@ -13,4 +13,4 @@ docs/     notes and templates
 ## Author
 Lucia Digel
 
-lllllllllllllllllllllllllllllll
+Lucia 06.11.26
