@@ -32,6 +32,8 @@ zip_files <- list.files("data/raw", pattern = "\\.zip$", full.names = TRUE)
 # apply the functiont to each one and combine results
 flux <- map_dfr(zip_files, read_hh)
 
+flux[flux == -9999] <- NA
+
 # check
 unique(flux$site) # 5 sites?
 count(flux, site) # number of half-hourly rows per tower 
