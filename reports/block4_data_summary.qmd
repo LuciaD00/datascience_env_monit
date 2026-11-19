@@ -10,24 +10,53 @@ execute:
   warning: false
 ---
 
-# Site overview
-
+# Data import
 ```{r}
-#| label: inspect snapshot
-
 library(readr)
 library(dplyr)
 library(here)
 library(lubridate)
+library(maps)
+library(ggplot2)
+library(tidyr)
+library(purrr)
+library(stringr)
 
+keep <- c("TIMESTAMP_START", "TIMESTAMP_END", "TA_F", "SW_IN_F", "VPD_F", "P_F",
+          "NETRAD", "G_F_MDS", "H_F_MDS", "H_F_MDS_QC", "LE_F_MDS", "LE_F_MDS_QC",
+          "NEE_VUT_REF", "NEE_VUT_REF_QC", "GPP_NT_VUT_REF", "RECO_NT_VUT_REF")
+
+read_hh <- function(zip_file) {
+  # find the half-hourly FLUXMET file inside this zip
+  hh_name <- grep("FLUXMET_HH", unzip(zip_file, list = TRUE)$Name, value = TRUE)[1]
+  # unzip only that csv
+  unzip(zip_file, files = hh_name, exdir = "data/raw/unzipped", overwrite = T)
+  # read it
+  hh <- read_csv(file.path("data/raw/unzipped", hh_name),
+               na = "-9999",
+               col_select = any_of(keep),
+               col_types = cols(TIMESTAMP_START = "c", TIMESTAMP_END = "c", .default = "d"))
+  hh$site <- str_extract(basename(hh_name), "[A-Z]{2}-[A-Za-z0-9]+") # add site id from file name
+  return(hh)} # return clean table
+
+zip_files <- list.files(here("data", "raw"), pattern = "\\.zip$", full.names = TRUE)
+
+flux <- map_dfr(zip_files, read_hh) # apply the functiont to each one and combine results
+flux <- flux |> mutate(time = as.POSIXct(TIMESTAMP_START, format = "%Y%m%d%H%M", tz = "UTC"))
+flux[flux == -9999] <- NA
+```
+
+# C1. Site overview
+```{r}
+#| label: site overview
+#| fig-width: 8
+#| fig-height: 5
+
+# inspect snapshot
 snapshot_file <- list.files(here("data", "snapshots"), pattern = "fluxnet_shuttle_snapshot_.*\\.csv$", full.names = TRUE)[1]
 snapshot <- read_csv(snapshot_file)
 
 names(snapshot)
-```
-
-```{r}
-#| label: site-overview
 
 site_overview <- snapshot |>
   filter(site_id %in% unique(flux$site)) |>
@@ -42,15 +71,6 @@ site_overview <- snapshot |>
     relocate(country, .after = site_name)
 
 site_overview
-```
-
-```{r}
-#| label: site-map
-#| fig-width: 8
-#| fig-height: 5
-
-library(maps)
-library(ggplot2)
 
 world <- map_data("world")
 
@@ -63,8 +83,7 @@ ggplot() +
     theme_minimal()
 ```
 
-# Data coverage
-
+# C2. Data coverage
 ```{r}
 #| label: data-coverage
 #| fig-width: 8
@@ -84,12 +103,8 @@ ggplot(coverage, aes(x = year, y = site, fill = share_measured)) +
 
 The best-covered NEE data are generally found in the years 2015-2024. The first year has mostly bad coverage. CH-Cha has the worst NEE data coverage and AU-Cum the best.
 
+# C3. Summary statistics
 ```{r}
-#| label: summary-stats
-#| fig-width: 8
-#| fig-height: 6
-
-# 1. Define the variables and their units
 vars_to_summarize <- c("TA_F", "SW_IN_F", "VPD_F", "P_F", "NEE_VUT_REF", 
                        "GPP_NT_VUT_REF", "RECO_NT_VUT_REF", "H_F_MDS", "LE_F_MDS")
 
@@ -97,59 +112,51 @@ units <- c("TA_F" = "°C", "SW_IN_F" = "W m⁻²", "VPD_F" = "kPa", "P_F" = "mm 
            "NEE_VUT_REF" = "µmol m⁻² s⁻¹", "GPP_NT_VUT_REF" = "µmol m⁻² s⁻¹", 
            "RECO_NT_VUT_REF" = "µmol m⁻² s⁻¹", "H_F_MDS" = "W m⁻²", "LE_F_MDS" = "W m⁻²")
 
-# 2. Special handling for Precipitation (Mean Annual Sum)
-precip_annual <- flux |>
-  mutate(year = year(time)) |>
-  group_by(site, year) |>
-  summarise(annual_P = sum(P_F, na.rm = TRUE), .groups = "drop") |>
-  group_by(site) |>
-  summarise(P_F_mean_annual = mean(annual_P, na.rm = TRUE))
-
-# 3. Calculate stats for all other variables
 summary_table <- flux |>
   select(site, all_of(vars_to_summarize)) |>
   pivot_longer(cols = -site, names_to = "variable", values_to = "value") |>
+  filter(variable != "P_F") |> # Exclude P_F here
   group_by(site, variable) |>
   summarise(
     mean = mean(value, na.rm = TRUE),
     min = min(value, na.rm = TRUE),
     max = max(value, na.rm = TRUE),
     perc_missing = mean(is.na(value)) * 100,
-    .groups = "drop"
-  )
+    .groups = "drop")
 
-# 4. Merge the annual precipitation mean back into the table
-# Remove the simple mean of P_F and replace it with the annual sum mean
-summary_table <- summary_table |>
-  filter(variable != "P_F") |>
-  left_join(precip_annual, by = "site") # This adds P_F_mean_annual as a new column
+# Precipitation as Mean Annual Sum
+precip_stats <- flux |>
+  mutate(year = year(time)) |>
+  group_by(site, year) |>
+  summarise(annual_sum = sum(P_F, na.rm = TRUE), .groups = "drop") |>
+  group_by(site) |>
+  summarise(
+    variable = "P_F",
+    mean = mean(annual_sum, na.rm = TRUE),
+    min = min(annual_sum, na.rm = TRUE),
+    max = max(annual_sum, na.rm = TRUE),
+    perc_missing = (sum(is.na(flux$P_F[flux$site == first(site)])) / length(flux$P_F[flux$site == first(site)])) * 100,
+    .groups = "drop")
 
-# To make it a "table per site" as requested, you can split the data 
-# or create a formatted long table. Here is a clean approach:
+summary_combined <- bind_rows(summary_table, precip_stats)
 
-# Join units to the variable names for the headers
-summary_final <- summary_table |>
-  mutate(variable_unit = paste0(variable, " (", units[variable], ")"))
+# create variable_unit column
+summary_final <- summary_combined |>
+  mutate(variable_unit = paste0(variable, " (", units[variable], ")")) |>
+  select(site, variable_unit, mean, min, max, perc_missing)
 
-# Displaying as separate tables per site
 site_list <- unique(flux$site)
 for (s in site_list) {
-  cat("\n### Site:", s, "\n")
-  print(summary_final |> filter(site == s) |> select(-site, -variable, variable_unit, mean, min, max, perc_missing))
-}
-
-View(summary_final)
+    cat("\n### Site:", s, "\n")
+    print(knitr::kable(summary_final |> filter(site == s) |> select(-site)))}
 ```
 
-
+# C4. Time series
 ```{r}
-#| label: time-series
 #| fig-width: 8
 #| fig-height: 5
 
-library(tidyr)
-
-# Aggregate half-hourly data to daily values
+# half-hourly data to daily values
 daily_flux <- flux |>
   mutate(date = as_date(time)) |> 
   group_by(site, date) |>
@@ -159,13 +166,11 @@ daily_flux <- flux |>
     RECO = mean(RECO_NT_VUT_REF, na.rm = TRUE),
     .groups = "drop")
 
-# Unit Conversion: 1 µmol CO₂ m⁻² s⁻¹ = 1.0378 g C m⁻² d⁻¹
 conv_factor <- 1.0378
 
 daily_flux_conv <- daily_flux |>
   mutate(across(c(NEE, GPP, RECO), ~ .x * conv_factor))
 
-# Reshape for plotting (Long format)
 plot_data <- daily_flux_conv |>
   pivot_longer(cols = c(NEE, GPP, RECO), 
                names_to = "Flux_Type", 
@@ -178,23 +183,22 @@ ggplot(plot_data, aes(x = date, y = Value, color = Flux_Type)) +
   labs(
     title = "Daily Carbon Fluxes per Site",
     x = "Date",
-    y = expression("Flux (g C m^-2 d^-1"),
+    y = expression("Flux (g C m^-2 d^-1)"),
     color = "Flux Type") +
   theme_minimal() +
   theme(legend.position = "bottom")
 ```
 
-
+# C5. Diurnal cycles
 ```{r}
-#| label: diurnal-cycles
 #| fig-width: 15
 #| fig-height: 10
 
-# Join latitude info to the flux data so we know the hemisphere
+# Join latitude info to the flux data for hemisphere
 flux_with_lat <- flux |>
   left_join(site_overview |> select(site_id, location_lat), by = c("site" = "site_id"))
 
-# Create Hour and Month variables
+# Hour and Month variables
 flux_with_time <- flux_with_lat |>
   mutate(hour = hour(time), month = month(time))
 
@@ -212,7 +216,6 @@ flux_with_seasons <- flux_with_time |>
     location_lat < 0  & month %in% c(6, 7, 8)  ~ "Winter",
     location_lat < 0  & month %in% c(9, 10, 11) ~ "Spring"))
 
-# mean diurnal course
 diurnal_summary <- flux_with_seasons |>
   group_by(site, season, hour) |>
   summarise(NEE = mean(NEE_VUT_REF, na.rm = TRUE), LE = mean(LE_F_MDS, na.rm = TRUE), .groups = "drop") |>
@@ -231,48 +234,58 @@ ggplot(diurnal_summary, aes(x = hour, y = Value, color = site)) +
 
 To determine the seasons, I used the latitude of each tower. For sites in the Northern Hemisphere (latitude ≥0), I assigned December, January, and February as Winter. For the site in the Southern Hemisphere (latitude <0), I reversed the seasonal assignment, designating December, January, and February as Summer. The diurnal cycles were then calculated by averaging all observations for each hour of the day across the respective seasons.
 
+# C6. Your reading (energy balance)
 ```{r}
-#| label: energy-balance
 #| fig-width: 5
 #| fig-height: 5
 
-# 1. Find a site that has both NETRAD and G_F_MDS
-# We check which site has the fewest NAs for these variables
+# Find a site that has both NETRAD and G_F_MDS (check for fewest NAs for these variables)
 energy_check <- flux |>
   group_by(site) |>
-  summarise(
-    valid_data = sum(!is.na(NETRAD) & !is.na(G_F_MDS))
-  ) |>
+  summarise(valid_data = sum(!is.na(NETRAD) & !is.na(G_F_MDS))) |>
   arrange(desc(valid_data))
 
-best_site <- energy_check$site[1] # Pick the site with the most data
+best_site <- energy_check$site[1] # pick site with the most data
 
-# 2. Prepare the data for the scatter plot
+# prepare data for scatter plot
 eb_data <- flux |>
   filter(site == best_site) |>
-  filter(H_F_MDS_QC == 0 & LE_F_MDS_QC == 0) |> # Use only measured H and LE
-  mutate(
-    available_energy = NETRAD - G_F_MDS,
-    turbulent_energy = H_F_MDS + LE_F_MDS
-  ) |>
+  filter(H_F_MDS_QC == 0 & LE_F_MDS_QC == 0) |> # only measured H and LE
+  mutate(available_energy = NETRAD - G_F_MDS, turbulent_energy = H_F_MDS + LE_F_MDS) |>
   filter(!is.na(available_energy), !is.na(turbulent_energy))
 
-# 3. Linear fit for the slope
+# linear fit for the slope
 fit <- lm(turbulent_energy ~ available_energy, data = eb_data)
 slope_val <- round(coef(fit)[2], 3)
 
-# 4. Plot
 ggplot(eb_data, aes(x = available_energy, y = turbulent_energy)) +
   geom_point(alpha = 0.3, size = 0.5, color = "grey50") +
   geom_abline(intercept = 0, slope = 1, color = "red", linewidth = 1) + # 1:1 line
-  geom_abline(intercept = coef(fit)[1], slope = coef(fit)[2], color = "blue", linewidth = 1) + # Fit line
-  labs(
-    title = paste("Energy Balance Closure for site", best_site),
+  geom_abline(intercept = coef(fit)[1], slope = coef(fit)[2], color = "blue", linewidth = 1) +
+  labs(title = paste("Energy Balance for site", best_site),
     subtitle = paste("Red = 1:1 line | Blue = Linear fit (Slope:", slope_val, ")"),
     x = expression("Available Energy (NETRAD" - "G_F_MDS) [W m^-2]"),
-    y = expression("Turbulent Energy (H_F_MDS" + "LE_F_MDS) [W m^-2]")
-  ) +
+    y = expression("Turbulent Energy (H_F_MDS" + "LE_F_MDS) [W m^-2]")) +
   theme_minimal()
 ```
 
+Comparing the five towers, CN-Dmn takes up the most carbon per year, as seen by its consistently lower NEE values in the daily time series. The largest seasonal cycle was also observed at CN-Dmn, where the flux shifted the strongest between the growing and non-growing seasons. I was surprised by how much the data quality varies between the sites. The share of measured NEE was highest for AU-Cum, while CH-Cha had significant gaps, meaning a large proportion of their annual totals are based on gap-filled estimates rather than direct measurements.
 
+# Data and citation
+
+**Site Citations:**
+Jaclyn Hatala Matthes, Cove Sturtevant, Patty Oikawa, Samuel D Chamberlain, Daphne Szutu, Ariane Arias-Ortiz, Joseph Verfaillie, Dennis Baldocchi (2026), AmeriFlux FLUXNET-1F US-Myb Mayberry Wetland, Ver. v1.3_r1 (2010-2025), AmeriFlux AMP, (Dataset). https://doi.org/10.17190/AMF/1871139
+
+Domec, J.C., Loustau, D., Aluome, C., Chipeaux, C., Denou, J.-L., Depuydt, J., Garrigou, C., Kruszewski, A., Lafont, S. (2026). Fluxnet Archive Product from Bilos, 2014-01-01–2026-09-06, FLUXNET, https://hdl.handle.net/11676/7T6UyUOXgB0j4LrWbPhTMu2P
+
+Buchmann, N., Hortnagl, L., Feigenwinter, I., Wang, Y., Zeeman, M., Merbold, L., Merbold, L., Fuchs, K., Baur, T., Meier, P. (2026). Fluxnet Archive Product from Chamau, 2005–2024, FLUXNET, https://hdl.handle.net/11676/_BRGI6F0aH0BpH6M9QscIcym
+
+Liu, S., Che, T., Xu, Z. (2026). Fluxnet Archive Product from Daman, 2012–2024, FLUXNET, https://hdl.handle.net/11676/rDvBU2EyWJDrd8bxJoMF69Lt
+
+Pendall, E., Griebel, A., Barton, C., Metzen, D. (2026): Cumberland Plain FLUXNET Release 2026_r1. Version 2026_r1. Terrestrial Ecosystem Research Network (TERN). (Dataset).
+
+**General Citations:**
+Pastorello et al. (2020), Scientific Data 7, 225, https://doi.org/10.1038/s41597-020-0534-3 
+
+**Acknowledgement:**
+FLUXNET data products were produced and harmonized by eddy covariance regional networks and data processing centers, including AmeriFlux, ChinaFlux, European Fluxes Database, ICOS, JapanFlux, KoFlux, OzFlux, SAEON, and TERN. These products also include a modified version of ERA5 hourly data provided by the Copernicus Climate Change Service.
