@@ -10,7 +10,7 @@ execute:
   warning: false
 ---
 
-# Merge data
+# get flux data
 ```{r}
 library(readr)
 library(dplyr)
@@ -21,6 +21,7 @@ library(ggplot2)
 library(tidyr)
 library(purrr)
 library(stringr)
+library(tidyverse)
 
 keep <- c("TIMESTAMP_START", "TIMESTAMP_END", "TA_F", "SW_IN_F", "VPD_F", "P_F",
           "NETRAD", "G_F_MDS", "H_F_MDS", "H_F_MDS_QC", "LE_F_MDS", "LE_F_MDS_QC",
@@ -45,6 +46,62 @@ flux <- map_dfr(zip_files, read_hh) # apply the functiont to each one and combin
 flux <- flux |> mutate(time = as.POSIXct(TIMESTAMP_START, format = "%Y%m%d%H%M", tz = "UTC"))
 flux[flux == -9999] <- NA
 ```
+
+# preparation of flux data
+```{r}
+flux_static <- flux |>
+  mutate(across(c(TA_F, P_F), ~ na_if(.x, -9999))) |>
+  mutate(year = year(time)) |>
+  group_by(site, year) |>
+  summarise(
+    annual_mean_temp = mean(TA_F, na.rm = TRUE),
+    annual_total_precip = sum(P_F, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  group_by(site) |>
+  summarise(
+    flux_mean_temp = mean(annual_mean_temp, na.rm = TRUE),
+    flux_total_precip = mean(annual_total_precip, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  rename(site_id = site)
+
+print(flux_static)
+```
+
+# get datasets
+```{r}
+worldclim <- read_csv(here("data/external/worldclim/worldclim_bio_my_sites.csv"))
+soilgrids <- read_csv(here("data/external/soilgrids/soilgrids_my_sites.csv"))
+
+names(worldclim)
+names(soilgrids)
+```
+
+# merge together
+```{r}
+site_static <- flux_static |>
+  left_join(worldclim, by = "site_id")
+
+# For SoilGrids: pick topsoil (0-30 cm) and one property, e.g., clay content
+# Or create a summary table per site for the report
+soil_topsoil <- soilgrids |>
+  filter(bottom_cm <= 30) |>
+  group_by(site_id, property) |>
+  summarise(
+    topsoil_mean = weighted.mean(mean, (bottom_cm - top_cm), na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = property, values_from = topsoil_mean)
+
+# Merge soil data
+site_static <- site_static |>
+  left_join(soil_topsoil, by = "site_id")
+
+print(site_static)
+```
+
+
 
 # Introduction
 
