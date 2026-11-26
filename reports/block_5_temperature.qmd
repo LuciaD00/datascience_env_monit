@@ -10,12 +10,84 @@ execute:
   warning: false
 ---
 
-# E1. Question and hypothesis
-Second dataset: Sand content table per tower, used in discussion to explain deviations
+* https://github.com/LuciaD00/datascience_env_monit/tree/main
 
-Are my five FLUXNET towers warmer or wetter than the 1970–2000 WorldClim climate normal?
-I expect all towers to show positive temperature deviations (warmer than normal) due to recent climate warming. The five towers span different climates (wetland in the US, forest in China and Switzerland, grassland in France, and woodland in Australia), making them a good test of whether warming is consistent across ecosystems.
-US-Myb is excluded from the analysis because WorldClim and SoilGrids return no valid data for this site.
+```{r}
+#| label: setup
+#| echo: false
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(here)
+library(lubridate)
+library(ggplot2)
+library(kableExtra)
+library(knitr)
+```
+
+```{r}
+#| label: load-and-merge
+#| include: false
+#| message: false
+#| warning: false
+
+keep <- c("TIMESTAMP_START", "TIMESTAMP_END", "TA_F", "SW_IN_F", "VPD_F", "P_F",
+          "NETRAD", "G_F_MDS", "H_F_MDS", "H_F_MDS_QC", "LE_F_MDS", "LE_F_MDS_QC",
+          "NEE_VUT_REF", "NEE_VUT_REF_QC", "GPP_NT_VUT_REF", "RECO_NT_VUT_REF")
+
+read_hh <- function(zip_file) {
+  hh_name <- grep("FLUXMET_HH", unzip(zip_file, list = TRUE)$Name, value = TRUE)[1]
+  unzip(zip_file, files = hh_name, exdir = "data/raw/unzipped", overwrite = TRUE)
+  hh <- read_csv(file.path("data/raw/unzipped", hh_name),
+               na = "-9999",
+               col_select = any_of(keep),
+               col_types = cols(TIMESTAMP_START = "c", TIMESTAMP_END = "c", .default = "d"))
+  hh$site <- str_extract(basename(hh_name), "[A-Z]{2}-[A-Za-z0-9]+")
+  return(hh)
+}
+
+zip_files <- list.files(here("data", "raw"), pattern = "\\.zip$", full.names = TRUE)
+flux <- map_dfr(zip_files, read_hh)
+flux <- flux |> mutate(time = as.POSIXct(TIMESTAMP_START, format = "%Y%m%d%H%M", tz = "UTC"))
+flux[flux == -9999] <- NA
+
+# Merge
+flux_static <- flux |>
+  mutate(across(c(TA_F, P_F), ~ na_if(.x, -9999))) |>
+  mutate(year = year(time)) |>
+  group_by(site, year) |>
+  summarise(annual_mean_temp = mean(TA_F, na.rm = TRUE), .groups = "drop") |>
+  group_by(site) |>
+  summarise(flux_mean_temp = mean(annual_mean_temp, na.rm = TRUE), .groups = "drop") |>
+  rename(site_id = site)
+
+worldclim <- read_csv(here("data/external/worldclim/worldclim_bio_my_sites.csv"))
+
+soil_texture <- read_csv(here("data/external/soilgrids/soilgrids_my_sites.csv")) |>
+  filter(property == "sand", bottom_cm <= 30) |>
+  group_by(site_id) |>
+  summarise(
+    sand_topsoil = weighted.mean(mean, (bottom_cm - top_cm), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+site_analysis <- flux_static |>
+  left_join(worldclim, by = "site_id") |>
+  left_join(soil_texture, by = "site_id") |>
+  mutate(temp_diff = flux_mean_temp - BIO1)
+
+site_complete <- site_analysis |>
+  filter(!is.na(temp_diff) & !is.na(sand_topsoil))
+```
+
+# E1. Question and hypothesis
+
+Question: Do my five FLUXNET towers differ from the 1970–2000 WorldClim climate normal, and does soil texture explain the deviations?
+
+Hypothesis: I expect all towers to show positive temperature deviations (warmer than normal) due to recent climate warming. I also expect towers with higher sand content to show larger temperature deviations, because sandy soils have lower heat capacity and drain faster, leading to stronger daytime heating.
+
+Why these towers: The five towers span different climates (wetland in the US, forest in China and Switzerland, grassland in France, and woodland in Australia), making them a good test of whether warming is consistent across ecosystems.
 
 # E2. Data
 
@@ -24,19 +96,196 @@ US-Myb is excluded from the analysis because WorldClim and SoilGrids return no v
 
 provenance <- tribble(
   ~Dataset, ~`Variables used`, ~`Spatial resolution`, ~`Time resolution and period`, ~`Downloaded on`, ~`Script and changes`, ~Citation,
-  "FLUXNET", "TA_F, P_F", "Tower point", "Half-hourly, [your record period]", "[Insert date]", "read_hh() from Block 4 (no changes)", "[Insert your snapshot citations]",
-  "WorldClim 2.1", "BIO1, BIO12", "~5 arc-min (~9 km)", "Monthly normals, 1970–2000", "[Insert date]", "02_worldclim.R (no changes)", "Fick & Hijmans (2017), https://doi.org/10.1002/joc.5086 ",
-  "SoilGrids 2.0", "Sand content", "250 m", "Static, current", "[Insert date]", "04_soilgrids.R (no changes)", "Poggio et al. (2021), https://doi.org/10.5194/soil-7-217-2021 "
+  "FLUXNET", "TA_F", "Tower point", "Half-hourly, varying time periods depending on the tower", "13.11.2026", "read_hh() from Block 4 (no changes)", "Jaclyn Hatala Matthes et al. (2026), AmeriFlux FLUXNET-1F US-Myb Mayberry Wetland, v1.3_r1; Domec et al. (2026), Bilos; Buchmann et al. (2026), Chamau; Liu et al. (2026), Daman; Pendall et al. (2026), Cumberland Plain. See Data and citation section for full citations and DOIs.",
+  "WorldClim 2.1", "BIO1", "~5 arc-min (~9 km)", "Monthly normals, 1970–2000", "20.11.2026", "02_worldclim.R (no changes)", "Fick & Hijmans (2017), https://doi.org/10.1002/joc.5086 ",
+  "SoilGrids 2.0", "Sand content", "250 m", "Static, current", "20.11.2026", "04_soilgrids.R (no changes)", "Poggio et al. (2021), https://doi.org/10.5194/soil-7-217-2021  "
 )
 
-kable(provenance, format = "html", escape = FALSE) |>
+kable(provenance, format = "html", escape = FALSE, caption = "Table 1: Provenance of datasets used in this analysis.") |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+```{r}
+#| label: datasets-at-towers
+
+dataset_table <- site_analysis |>
+  select(site_id, BIO1, sand_topsoil) |>
+  rename(
+    `Site` = site_id,
+    `WorldClim BIO1 (°C)` = BIO1,
+    `SoilGrids Sand (%)` = sand_topsoil
+  ) |>
+  mutate(
+    `WorldClim BIO1 (°C)` = round(`WorldClim BIO1 (°C)`, 1),
+    `SoilGrids Sand (%)` = round(`SoilGrids Sand (%)`, 1)
+  )
+
+kable(dataset_table, format = "html", escape = FALSE, caption = "Table 2: WorldClim BIO1 and SoilGrids sand content at the five towers.") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
 ```
 
 # E3. Methods
 
+## Download
+FLUXNET half-hourly data were loaded using the `read_hh()` function from Block 4, which reads the five zip files with `na = "-9999"`, and parses timestamps as POSIXct in UTC. No changes were made to the function. WorldClim data were downloaded with `scripts/block5/02_worldclim.R`, extracting the bioclimatic variable BIO1 (mean annual temperature). SoilGrids data were downloaded with `scripts/block5/04_soilgrids.R` using default settings, reading all soil properties and depths; only sand content in the topsoil (0–30 cm) was retained for this analysis. No changes were made to either script.
+
+What failed: US-Myb returned `NA` for every WorldClim BIO variable and every SoilGrids property, likely because the wetland tower falls on a water-masked pixel in these global datasets. US-Myb was excluded from the deviation and correlation analyses.
+
+## Extraction
+Spatial extraction was performed with `terra::extract()` for both datasets. Tower coordinates (longitude, latitude) from `tower_sets_block4.csv` were assigned CRS EPSG:4326 (WGS84). WorldClim BIO1 (mean annual temperature) was extracted at the nearest grid cell for each tower point. SoilGrids sand content was extracted at the nearest 250 m pixel for each tower point; fill values (-32768, 65535) were converted to `NA`.
+
+## Processing
+FLUXNET data: Values of `-9999` were converted to `NA`. Timestamps were parsed as `POSIXct` in UTC from `TIMESTAMP_START` (`%Y%m%d%H%M`). Half-hourly `TA_F` was aggregated to annual means per tower per year, then averaged across all available years to produce one mean temperature per tower. The FLUXNET column `site` was renamed to `site_id` to match the Block 5 datasets. WorldClim BIO1 was used directly in °C. SoilGrids sand values (stored as integers in g/kg) were divided by 10 to convert to percent, then a thickness-weighted mean was calculated across the topsoil depths 0–5 cm, 5–15 cm, and 15–30 cm using weights `(bottom_cm − top_cm)`. Missing values were not filled by hand and no values were copied from another tower.
+
+## Analysis
+Temperature deviation from the 1970–2000 WorldClim normal was calculated as:
+
+`temp_diff = FLUXNET mean temperature − WorldClim BIO1`
+
+The relationship between topsoil sand content and temperature deviation was tested with a Pearson correlation and linear regression (`lm(temp_diff ~ sand_topsoil)`). The analysis rests on n = 4 towers (after excluding US-Myb).
+
 # E4. Results
+
+## Temperature Deviation
+
+```{r}
+#| label: temp-plot
+#| fig-cap: "Temperature deviation from the 1970–2000 WorldClim climate normal at four FLUXNET towers (US-Myb excluded: no valid data pixel)."
+#| fig-width: 8
+#| fig-height: 5
+
+ggplot(site_complete, aes(x = reorder(site_id, temp_diff), y = temp_diff, label = site_id)) +
+  geom_col(fill = "steelblue", alpha = 0.7) +
+  geom_text(aes(label = round(temp_diff, 2)), vjust = -0.5, size = 4) +
+  labs(
+    x = "Tower Site",
+    y = "Temperature Deviation (°C)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(size = 12))
+```
+
+```{r}
+#| label: temp-summary-table
+
+temp_table <- site_complete |>
+  select(site_id, flux_mean_temp, BIO1, temp_diff) |>
+  rename(
+    `Tower` = site_id,
+    `FLUXNET mean temp (°C)` = flux_mean_temp,
+    `WorldClim BIO1 normal (°C)` = BIO1,
+    `Temperature deviation (°C)` = temp_diff
+  ) |>
+  mutate(
+    `FLUXNET mean temp (°C)` = round(`FLUXNET mean temp (°C)`, 2),
+    `WorldClim BIO1 normal (°C)` = round(`WorldClim BIO1 normal (°C)`, 2),
+    `Temperature deviation (°C)` = round(`Temperature deviation (°C)`, 2)
+  ) |>
+  arrange(desc(`Temperature deviation (°C)`))
+
+kable(temp_table, format = "html", escape = FALSE, align = "l", caption = "Table 3: Temperature deviation from the 1970–2000 WorldClim normal (n = 4).") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r}
+#| label: summary-number
+
+summary_number <- site_complete |>
+  summarise(
+    mean_temp_diff = round(mean(temp_diff, na.rm = TRUE), 2),
+    n_towers = n()
+  )
+
+cat("Summary number: Mean temperature deviation =", 
+    summary_number$mean_temp_diff, 
+    "°C (n =", summary_number$n_towers, "towers)\n")
+```
+
+## Temperature Deviation and Soil Sand Content
+
+```{r}
+#| label: soil-results
+#| fig-cap: "Relationship between topsoil sand content (0–30 cm) and temperature deviation from the 1970–2000 WorldClim normal at four FLUXNET towers."
+#| fig-width: 8
+#| fig-height: 5
+
+# Correlation and linear fit
+cor_test <- cor.test(site_complete$sand_topsoil, site_complete$temp_diff, method = "pearson")
+lm_sand <- lm(temp_diff ~ sand_topsoil, data = site_complete)
+
+# Extract values
+r_val <- round(cor_test$estimate, 2)
+p_val <- round(cor_test$p.value, 3)
+r2_val <- round(summary(lm_sand)$r.squared, 3)
+slope_val <- round(coef(lm_sand)[2], 3)
+n_val <- nrow(site_complete)
+
+# Plot: sand vs temperature deviation
+ggplot(site_complete, aes(x = sand_topsoil, y = temp_diff)) +
+  geom_point(size = 4, color = "forestgreen") +
+  geom_text(aes(label = site_id), vjust = -1.5, size = 3.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkgreen", linewidth = 1) +
+  labs(
+    subtitle = paste0("n = ", n_val, " towers"),
+    x = "Topsoil Sand Content (%)",
+    y = "Temperature Deviation (°C)",
+    caption = paste0("r = ", r_val, " | p = ", p_val, 
+                     " | R² = ", r2_val, " | slope = ", slope_val, " °C per % sand")
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(plot.caption = element_text(hjust = 0, size = 10))
+```
+
+```{r}
+#| label: soil-table
+
+soil_table <- site_complete |>
+  select(site_id, sand_topsoil, temp_diff) |>
+  rename(
+    `Tower` = site_id,
+    `Sand Content (%)` = sand_topsoil,
+    `Temperature Deviation (°C)` = temp_diff
+  ) |>
+  mutate(
+    `Sand Content (%)` = round(`Sand Content (%)`, 1),
+    `Temperature Deviation (°C)` = round(`Temperature Deviation (°C)`, 2)
+  ) |>
+  arrange(desc(`Temperature Deviation (°C)`))
+
+kable(soil_table, format = "html", escape = FALSE, align = "l", caption = "Table 4: Topsoil sand content and temperature deviation (n = 4).") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
 
 # E5. Discussion
 
+All four towers with complete data show positive temperature deviations from the 1970–2000 WorldClim normal, supporting my hypothesis that these sites are warmer now than the historical baseline. Deviations range from 0.67 °C at CH-Cha to 1.53 °C at FR-Bil, with CN-Dmn (1.43 °C) and AU-Cum (1.07 °C) in between, indicating consistent warming across diverse ecosystems from grassland to forest. However, the correlation between topsoil sand content and temperature deviation was weak and not statistically significant (r = 0.39, p = 0.609, n = 4), with sand explaining only 15.3% of the variation. Notably, AU-Cum has the highest sand content (69.9%) but only a moderate deviation (1.07 °C). 
+
+WorldClim (~9 km pixels) and SoilGrids (250 m pixels) operate at coarser spatial resolution than the typical flux tower footprint (on the order of 100 m to 1 km). This means the gridded values represent an average over a larger area than the tower measures, which may introduce uncertainty. A special case is US-Myb, where the wetland tower returned no valid data in either dataset, likely because the tower point falls on a masked pixel.
+
+The two most important limitations are the small sample size (n = 4 towers), which prevents statistical inference, and the use of static soil properties and annual means rather than seasonal dynamics. With more time or data I would analyse seasonal temperature deviations instead of annual means, and test the sand–temperature relationship with a larger network of towers. I would also use more complex models that could show the relationship between sand content and temperature better.
+
 # E6. Data and citations
+
+## FLUXNET site citations
+
+Jaclyn Hatala Matthes, Cove Sturtevant, Patty Oikawa, Samuel D Chamberlain, Daphne Szutu, Ariane Arias-Ortiz, Joseph Verfaillie, Dennis Baldocchi (2026), AmeriFlux FLUXNET-1F US-Myb Mayberry Wetland, Ver. v1.3_r1 (2010-2025), AmeriFlux AMP, (Dataset). https://doi.org/10.17190/AMF/1871139 
+
+Domec, J.C., Loustau, D., Aluome, C., Chipeaux, C., Denou, J.-L., Depuydt, J., Garrigou, C., Kruszewski, A., Lafont, S. (2026). Fluxnet Archive Product from Bilos, 2014-01-01–2026-09-06, FLUXNET, https://hdl.handle.net/11676/7T6UyUOXgB0j4LrWbPhTMu2P
+
+Buchmann, N., Hortnagl, L., Feigenwinter, I., Wang, Y., Zeeman, M., Merbold, L., Fuchs, K., Baur, T., Meier, P. (2026). Fluxnet Archive Product from Chamau, 2005–2024, FLUXNET, https://hdl.handle.net/11676/_BRGI6F0aH0BpH6M9QscIcym
+
+Liu, S., Che, T., Xu, Z. (2026). Fluxnet Archive Product from Daman, 2012–2024, FLUXNET, https://hdl.handle.net/11676/rDvBU2EyWJDrd8bxJoMF69Lt
+
+Pendall, E., Griebel, A., Barton, C., Metzen, D. (2026): Cumberland Plain FLUXNET Release 2026_r1. Version 2026_r1. Terrestrial Ecosystem Research Network (TERN). (Dataset).
+
+## General citations
+
+Pastorello et al. (2020), Scientific Data 7, 225, https://doi.org/10.1038/s41597-020-0534-3  
+
+Fick, S.E. & Hijmans, R.J. (2017) WorldClim 2. Int. J. Climatol. 37, 4302–4315. https://doi.org/10.1002/joc.5086  
+
+Poggio, L. et al. (2021) SoilGrids 2.0. SOIL 7, 217–240. https://doi.org/10.5194/soil-7-217-2021  
+
+## FLUXNET acknowledgement
+
+FLUXNET data products were produced and harmonized by eddy covariance regional networks and data processing centers, including AmeriFlux, ChinaFlux, European Fluxes Database, ICOS, JapanFlux, KoFlux, OzFlux, SAEON, and TERN. These products also include a modified version of ERA5 hourly data provided by the Copernicus Climate Change Service.

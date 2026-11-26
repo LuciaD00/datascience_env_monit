@@ -23,6 +23,8 @@ library(purrr)
 library(stringr)
 library(tidyverse)
 library(kableExtra)
+library(knitr)
+
 
 keep <- c("TIMESTAMP_START", "TIMESTAMP_END", "TA_F", "SW_IN_F", "VPD_F", "P_F",
           "NETRAD", "G_F_MDS", "H_F_MDS", "H_F_MDS_QC", "LE_F_MDS", "LE_F_MDS_QC",
