@@ -22,6 +22,7 @@ library(tidyr)
 library(purrr)
 library(stringr)
 library(tidyverse)
+library(kableExtra)
 
 keep <- c("TIMESTAMP_START", "TIMESTAMP_END", "TA_F", "SW_IN_F", "VPD_F", "P_F",
           "NETRAD", "G_F_MDS", "H_F_MDS", "H_F_MDS_QC", "LE_F_MDS", "LE_F_MDS_QC",
@@ -47,77 +48,108 @@ flux <- flux |> mutate(time = as.POSIXct(TIMESTAMP_START, format = "%Y%m%d%H%M",
 flux[flux == -9999] <- NA
 ```
 
-# preparation of flux data
+# merge data
 ```{r}
+# one row per site for flux data
 flux_static <- flux |>
   mutate(across(c(TA_F, P_F), ~ na_if(.x, -9999))) |>
   mutate(year = year(time)) |>
   group_by(site, year) |>
-  summarise(
-    annual_mean_temp = mean(TA_F, na.rm = TRUE),
-    annual_total_precip = sum(P_F, na.rm = TRUE),
-    .groups = "drop"
-  ) |>
+  summarise(annual_mean_temp = mean(TA_F, na.rm = TRUE), .groups = "drop") |>
   group_by(site) |>
-  summarise(
-    flux_mean_temp = mean(annual_mean_temp, na.rm = TRUE),
-    flux_total_precip = mean(annual_total_precip, na.rm = TRUE),
-    .groups = "drop"
-  ) |>
+  summarise(flux_mean_temp = mean(annual_mean_temp, na.rm = TRUE), .groups = "drop") |>
   rename(site_id = site)
 
-print(flux_static)
-```
-
-# get datasets
-```{r}
 worldclim <- read_csv(here("data/external/worldclim/worldclim_bio_my_sites.csv"))
-soilgrids <- read_csv(here("data/external/soilgrids/soilgrids_my_sites.csv"))
 
-names(worldclim)
-names(soilgrids)
-```
-
-# merge together
-```{r}
-site_static <- flux_static |>
-  left_join(worldclim, by = "site_id")
-
-# For SoilGrids: pick topsoil (0-30 cm) and one property, e.g., clay content
-# Or create a summary table per site for the report
-soil_topsoil <- soilgrids |>
-  filter(bottom_cm <= 30) |>
-  group_by(site_id, property) |>
+soil_texture <- read_csv(here("data/external/soilgrids/soilgrids_my_sites.csv")) |>
+  filter(property == "sand", bottom_cm <= 30) |>
+  group_by(site_id) |>
   summarise(
-    topsoil_mean = weighted.mean(mean, (bottom_cm - top_cm), na.rm = TRUE),
+    sand_topsoil = weighted.mean(mean, (bottom_cm - top_cm), na.rm = TRUE),
     .groups = "drop"
-  ) |>
-  pivot_wider(names_from = property, values_from = topsoil_mean)
+  )
 
-# Merge soil data
-site_static <- site_static |>
-  left_join(soil_topsoil, by = "site_id")
+site_analysis <- flux_static |>
+  left_join(worldclim, by = "site_id") |>
+  left_join(soil_texture, by = "site_id") |>
+  mutate(temp_diff = flux_mean_temp - BIO1)
 
-print(site_static)
+site_complete <- site_analysis |>
+  filter(!is.na(temp_diff) & !is.na(sand_topsoil))
+
+summary(site_complete)
+View(site_complete)
+
+cat("Towers with complete data:", nrow(site_complete), "\n")
+cat("Excluded:", site_analysis$site_id[is.na(site_analysis$temp_diff)], "\n\n")
 ```
 
+# Temp deviation from WorldClim normal
 
+```{r}
+# Calculate summary stats for temperature
+temp_summary <- site_complete |>
+  summarise(
+    n_towers = n(),
+    mean_flux_temp = round(mean(flux_mean_temp, na.rm = TRUE), 2),
+    mean_worldclim_temp = round(mean(BIO1, na.rm = TRUE), 2),
+    mean_temp_diff = round(mean(temp_diff, na.rm = TRUE), 2),
+    sd_temp_diff = round(sd(temp_diff, na.rm = TRUE), 2),
+    min_temp_diff = round(min(temp_diff, na.rm = TRUE), 2),
+    max_temp_diff = round(max(temp_diff, na.rm = TRUE), 2),
+    .groups = "drop"
+  )
 
-# Introduction
+print(temp_summary)
+```
 
-# Data Sources
+# Sand content vs Temperature deviation
 
-- **ERA5‑Land** – daily climate variables.
-- **WorldClim** – bioclimatic indices.
-- **SoilGrids** – soil property layers.
-- **PlantTraits** – functional trait measurements.
-- **iNaturalist** – biodiversity observations.
-- **MODIS** – NDVI/EVI composites.
+```{r}
+cor_test <- cor.test(site_complete$sand_topsoil, site_complete$temp_diff, 
+                     method = "pearson")
 
-# Summary
+lm_sand <- lm(temp_diff ~ sand_topsoil, data = site_complete)
 
-> Add tables, plots, and narrative here as you process the data.
+cat("\n--- Sand vs Temperature Deviation ---\n")
+cat("n =", nrow(site_complete), "towers\n")
+cat("r =", round(cor_test$estimate, 3), "\n")
+cat("p-value =", round(cor_test$p.value, 3), "\n")
+cat("R-squared =", round(summary(lm_sand)$r.squared, 3), "\n")
+cat("Slope =", round(coef(lm_sand)[2], 3), "°C per % sand\n")
+cat("Intercept =", round(coef(lm_sand)[1], 3), "\n")
+```
 
-# References
+# Plot
 
-- Cite each dataset according to its header in the respective script.
+```{r}
+ggplot(site_complete, aes(x = sand_topsoil, y = temp_diff)) +
+  geom_point(size = 4, color = "steelblue") +
+  geom_text(aes(label = site_id), vjust = -1.5, size = 3.5) +  # label only here
+  geom_smooth(method = "lm", se = TRUE, color = "red", linewidth = 1) +
+  labs(
+    title = "Soil Sand Content vs. Temperature Deviation from 1970–2000 Normal",
+    subtitle = paste0("n = ", nrow(site_complete), " towers (US-Myb excluded: no WorldClim/SoilGrids pixel)"),
+    x = "Topsoil Sand Content (%)",
+    y = "Temperature Deviation (°C)\n(FLUXNET mean − WorldClim BIO1)",
+    caption = paste0("r = ", round(cor_test$estimate, 2),
+                     " | p = ", round(cor_test$p.value, 3),
+                     " | slope = ", round(coef(lm_sand)[2], 3),
+                     " °C per % sand")
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(plot.caption = element_text(hjust = 0, size = 10))
+```
+
+# STEP 4: Summary table for your report
+
+```{r}
+print(site_complete |>
+  select(site_id, flux_mean_temp, BIO1, temp_diff, sand_topsoil) |>
+  arrange(desc(temp_diff)))
+```
+
+```{r}
+
+```

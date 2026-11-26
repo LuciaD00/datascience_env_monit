@@ -1,0 +1,42 @@
+---
+title: "Block 5: Temperature deviation from climate normal"
+author: "Lucia Digel"
+date: today
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  warning: false
+---
+
+# E1. Question and hypothesis
+Second dataset: Sand content table per tower, used in discussion to explain deviations
+
+Are my five FLUXNET towers warmer or wetter than the 1970–2000 WorldClim climate normal?
+I expect all towers to show positive temperature deviations (warmer than normal) due to recent climate warming. The five towers span different climates (wetland in the US, forest in China and Switzerland, grassland in France, and woodland in Australia), making them a good test of whether warming is consistent across ecosystems.
+US-Myb is excluded from the analysis because WorldClim and SoilGrids return no valid data for this site.
+
+# E2. Data
+
+```{r}
+#| label: provenance-table
+
+provenance <- tribble(
+  ~Dataset, ~`Variables used`, ~`Spatial resolution`, ~`Time resolution and period`, ~`Downloaded on`, ~`Script and changes`, ~Citation,
+  "FLUXNET", "TA_F, P_F", "Tower point", "Half-hourly, [your record period]", "[Insert date]", "read_hh() from Block 4 (no changes)", "[Insert your snapshot citations]",
+  "WorldClim 2.1", "BIO1, BIO12", "~5 arc-min (~9 km)", "Monthly normals, 1970–2000", "[Insert date]", "02_worldclim.R (no changes)", "Fick & Hijmans (2017), https://doi.org/10.1002/joc.5086 ",
+  "SoilGrids 2.0", "Sand content", "250 m", "Static, current", "[Insert date]", "04_soilgrids.R (no changes)", "Poggio et al. (2021), https://doi.org/10.5194/soil-7-217-2021 "
+)
+
+kable(provenance, format = "html", escape = FALSE) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+# E3. Methods
+
+# E4. Results
+
+# E5. Discussion
+
+# E6. Data and citations
